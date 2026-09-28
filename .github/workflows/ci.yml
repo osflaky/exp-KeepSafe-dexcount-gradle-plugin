@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - jdk: 17
+          os: ubuntu-latest
+          arch: arm64
+          runner: ubuntu-24.04-arm
+          expander_leg: ubuntu-latest--arm64
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Import snapshot GPG key
+      run: |
+        echo "$GPG_SIGNING_KEY_PW" | gpg --batch --import --yes --passphrase-fd 0 <(echo -n "$GPG_SIGNING_KEY" | base64 --decode)
+        mkdir -p ~/.gradle
+        echo -n "signing.gnupg.passphrase=${GPG_SIGNING_KEY_PW}" >> ~/.gradle/gradle.properties
+      env:
+        GPG_SIGNING_KEY: ${{ secrets.GPG_SIGNING_KEY }}
+        GPG_SIGNING_KEY_PW: ${{ secrets.GPG_SIGNING_KEY_PW }}
+      if: >-
+        github.repository == 'KeepSafe/dexcount-gradle-plugin' && github.ref == 'refs/heads/master'
+
+    - name: Import random GPG key
+      run: |
+        gpg --batch --gen-key <(cat <<EOF
+          Key-Type: 1
+          Key-Length: 2048
+          Key-Usage: sign
+          Passphrase: foobar
+          Name-Real: Dexcount Developers
+          Name-Email: foo@bar.com
+          Expire-Date: seconds=1200
+          %commit
+        EOF
+        )
+        mkdir -p ~/.gradle
+        echo -n "signing.gnupg.passphrase=foobar" >> ~/.gradle/gradle.properties
+      if: >-
+        github.repository != 'KeepSafe/dexcount-gradle-plugin' ||
+        github.ref != 'refs/heads/master'
+
+    - name: Set up JDK ${{ matrix.jdk }}
+      uses: actions/setup-java@v3
+      with:
+        java-version: ${{ matrix.jdk }}
+        distribution: 'zulu'
+
+      # The ubuntu arm64 runner image has no Android SDK preinstalled.
+    - name: Set up Android SDK
+      if: runner.os == 'Linux' && runner.arch == 'ARM64'
+      uses: android-actions/setup-android@v3
+      with:
+        packages: 'platforms;android-28'
+
+      # AGP only publishes an x86_64 AAPT2 binary for Linux, so on arm64 Linux
+      # run it through qemu-user with an amd64 sysroot for its glibc.
+    - name: Enable x86_64 emulation for AAPT2
+      if: runner.os == 'Linux' && runner.arch == 'ARM64'
+      uses: docker/setup-qemu-action@v3
+      with:
+        platforms: amd64
+
+    - name: Provide amd64 sysroot for AAPT2
+      if: runner.os == 'Linux' && runner.arch == 'ARM64'
+      run: |
+        sudo mkdir -p /opt/amd64-root
+        cid=$(docker create --platform linux/amd64 ubuntu:24.04)
+        docker export "$cid" | sudo tar -x -C /opt/amd64-root
+        docker rm "$cid"
+        echo "QEMU_LD_PREFIX=/opt/amd64-root" >> "$GITHUB_ENV"
+
+    - name: Cache Gradle
+      uses: gradle/gradle-build-action@v2
+
+    - name: Build and test
+      run: ./gradlew check
+
+    - name: Deploy snapshot
+      run: ./gradlew uploadSnapshot
+      if: >-
+        github.event_name == 'push' &&
+        github.repository == 'KeepSafe/dexcount-gradle-plugin' &&
+        github.ref == 'refs/heads/master'
+      env:
+        ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ 
+          secrets.SONATYPE_NEXUS_USERNAME }}
+        ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ 
+          secrets.SONATYPE_NEXUS_PASSWORD }}
+    name: build [${{ matrix.expander_leg }}]
+    timeout-minutes: 150
