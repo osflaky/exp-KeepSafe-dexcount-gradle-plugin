@@ -1,0 +1,10 @@
+// Sets the output JAR filename
+rootProject.name = "dexcount-gradle-plugin"
+
+buildCache {
+    local {
+        directory = new File(rootDir, "build-cache")
+    }
+}
+
+enableFeaturePreview("GROOVY_COMPILATION_AVOIDANCE")
